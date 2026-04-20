@@ -4,6 +4,8 @@ package com.example.orderservice.repository;
 import com.example.orderservice.model.OutboxEvent;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -11,4 +13,5 @@ import java.util.UUID;
 public interface OutboxRepository extends JpaRepository<OutboxEvent, UUID> {
     // Finds messages that haven't been sent to Kafka yet
     List<OutboxEvent> findByProcessedFalse();
+    void deleteByProcessedTrueAndCreatedAtBefore(LocalDateTime day);
 }

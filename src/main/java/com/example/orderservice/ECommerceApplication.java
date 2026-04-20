@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
@@ -20,7 +21,9 @@ import java.util.Map;
 @SpringBootApplication
 @EnableScheduling           // 1. MUST HAVE: This wakes up the OutboxPublisher
 @EnableKafka  // <--- Add this to be safe
-@EnableTransactionManagement // 2. MUST HAVE: This makes @Transactional work in your Service
+@EnableTransactionManagement
+@EnableJpaAuditing // <--- This is the magic switch
+// 2. MUST HAVE: This makes @Transactional work in your Service
 public class ECommerceApplication {
 	// Pull from application.properties
 	@Value("${spring.kafka.bootstrap-servers}")

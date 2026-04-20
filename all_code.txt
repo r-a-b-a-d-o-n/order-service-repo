@@ -1,0 +1,621 @@
+===== ./.mvn/wrapper/maven-wrapper.properties =====
+wrapperVersion=3.3.4
+distributionType=only-script
+distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.14/apache-maven-3.9.14-bin.zip
+
+
+===== ./src/test/java/com/example/orderservice/ECommerceApplicationTests.java =====
+package com.example.orderservice;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+class ECommerceApplicationTests {
+
+	@Test
+	void contextLoads() {
+	}
+
+}
+
+
+===== ./src/main/resources/application.properties =====
+spring.application.name=order-service
+# Enable Java 21 Virtual Threads
+spring.threads.virtual.enabled=true
+server.port=8081
+# Kafka Settings
+spring.kafka.bootstrap-servers=localhost:9092
+spring.kafka.producer.value-serializer=org.apache.kafka.common.serialization.StringSerializer
+
+# Database (H2 for easy testing)
+spring.h2.console.enabled=true
+spring.h2.console.path=/h2-console
+
+# This setting is critical for Spring Boot 4+
+spring.h2.console.settings.web-allow-others=true
+
+# Ensure the DB name matches what you type in the login box
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+
+# This shows the SQL in your IntelliJ console so we can see the inserts!
+spring.jpa.show-sql=true
+spring.jpa.hibernate.ddl-auto=update
+
+# Change this line:
+spring.datasource.url=jdbc:h2:file:./data/orderdb;DB_CLOSE_DELAY=-1
+
+
+
+
+# Tells Spring how to turn your Java Strings into Kafka bytes
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+
+
+# Kafka Consumer Settings
+spring.kafka.consumer.group-id=order-group
+spring.kafka.consumer.auto-offset-reset=earliest
+spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.value-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.producer.properties.spring.json.add.type.headers=false
+
+
+# Expose the metrics to the outside world
+management.endpoints.web.exposure.include=prometheus,health,info
+# Optional: Add tags so you can tell which app is which in Grafana
+management.metrics.tags.application=order-service
+
+
+===== ./src/main/java/com/example/orderservice/dto/OrderStatus.java =====
+package com.example.orderservice.dto;
+
+public enum OrderStatus {
+    CANCELLED_OUT_OF_STOCK,
+    CANCELLED_PAYMENT_FAILED,
+    CONFIRMED,
+    PENDING
+}
+
+
+===== ./src/main/java/com/example/orderservice/dto/OrderEvent.java =====
+package com.example.orderservice.dto;
+
+public class OrderEvent {
+}
+
+
+===== ./src/main/java/com/example/orderservice/dto/OrderRequest.java =====
+package com.example.orderservice.dto;
+
+
+public record OrderRequest(String productCode,Integer quantity, Double amount) {
+}
+
+===== ./src/main/java/com/example/orderservice/repository/OrderRepository.java =====
+package com.example.orderservice.repository;
+
+
+import com.example.orderservice.model.Order;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Repository
+public interface OrderRepository extends JpaRepository<Order, Long> {
+
+    // Spring Data JPA derives the SQL from this name
+    List<Order> findAllByStatusAndCreatedAtBefore(String status, LocalDateTime dateTime);
+
+}
+
+
+
+===== ./src/main/java/com/example/orderservice/repository/OutboxRepository.java =====
+package com.example.orderservice.repository;
+
+
+import com.example.orderservice.model.OutboxEvent;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@Repository
+public interface OutboxRepository extends JpaRepository<OutboxEvent, UUID> {
+    // Finds messages that haven't been sent to Kafka yet
+    List<OutboxEvent> findByProcessedFalse();
+    void deleteByProcessedTrueAndCreatedAtBefore(LocalDateTime day);
+}
+
+===== ./src/main/java/com/example/orderservice/publisher/OutboxPublisher.java =====
+package com.example.orderservice.publisher;
+
+import com.example.orderservice.repository.OutboxRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+public class OutboxPublisher {
+    public static final String ORDER_CREATED = "order-created";
+    private final OutboxRepository outboxRepo;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+
+    @Scheduled(fixedDelay = 1000) // Poll every second
+    public void publish() {
+        var events = outboxRepo.findByProcessedFalse();
+        events.forEach(event -> {
+            kafkaTemplate.send(ORDER_CREATED, event.getPayload());
+            event.setProcessed(true);
+            outboxRepo.save(event);
+        });
+    }
+
+
+}
+
+===== ./src/main/java/com/example/orderservice/ECommerceApplication.java =====
+package com.example.orderservice;
+
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
+import org.springframework.kafka.annotation.EnableKafka;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.*;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@SpringBootApplication
+@EnableScheduling           // 1. MUST HAVE: This wakes up the OutboxPublisher
+@EnableKafka  // <--- Add this to be safe
+@EnableTransactionManagement
+@EnableJpaAuditing // <--- This is the magic switch
+// 2. MUST HAVE: This makes @Transactional work in your Service
+public class ECommerceApplication {
+	// Pull from application.properties
+	@Value("${spring.kafka.bootstrap-servers}")
+	private String bootstrapServers;
+
+	@Value("${spring.kafka.consumer.group-id}")
+	private String groupId;
+	public static void main(String[] args) {
+		SpringApplication.run(ECommerceApplication.class, args);
+	}
+
+
+
+	@Bean
+	public ConsumerFactory<String, String> consumerFactory() {
+		Map<String, Object> props = new HashMap<>();
+		props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers); // Externalized!
+		props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);                   // Externalized!
+		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		return new DefaultKafkaConsumerFactory<>(props);
+	}
+	// 3. MANUAL KAFKA BEANS (Solves your "Bean not found" error)
+	@Bean
+	public ProducerFactory<String, String> producerFactory() {
+		Map<String, Object> configProps = new HashMap<>();
+		// Address of your Docker Kafka
+		configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+		// How to package the data
+		configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+		configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+		return new DefaultKafkaProducerFactory<>(configProps);
+	}
+
+
+	@Bean
+	public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory() {
+		ConcurrentKafkaListenerContainerFactory<String, String> factory =
+				new ConcurrentKafkaListenerContainerFactory<>();
+		factory.setConsumerFactory(consumerFactory());
+		return factory;
+	}
+
+	@Bean
+	public KafkaTemplate<String, String> kafkaTemplate() {
+		return new KafkaTemplate<>(producerFactory());
+	}
+}
+
+===== ./src/main/java/com/example/orderservice/controller/OrderController.java =====
+package com.example.orderservice.controller;
+
+import com.example.orderservice.dto.OrderRequest;
+import com.example.orderservice.service.OrderService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/v1/orders")
+@RequiredArgsConstructor
+public class OrderController {
+
+    private final OrderService orderService;
+
+    @PostMapping
+    public ResponseEntity<String> createOrder(@RequestBody OrderRequest request) {
+        try {
+            orderService.createOrder(request);
+            return ResponseEntity.status(HttpStatus.CREATED).body("Order accepted and pending payment.");
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Error: " + e.getMessage());
+        }
+    }
+}
+
+
+//package com.example.orderservice;
+//
+//import com.example.orderservice.dto.OrderRequest;
+//import org.springframework.http.ResponseEntity;
+//import org.springframework.web.bind.annotation.PostMapping;
+//import org.springframework.web.bind.annotation.RequestBody;
+//import org.springframework.web.bind.annotation.RequestMapping;
+//import org.springframework.web.bind.annotation.RestController;
+//
+//@RestController
+//@RequestMapping("/api")
+//public class EcommerceController {
+//
+//
+//
+//    @PostMapping(value = "/data", version = "1")
+//    public ResponseEntity<String> createOrderV1(@RequestBody OrderRequest request) {
+//        orderService.createOrder(request);
+//        return ResponseEntity.ok("Order created");
+//    }
+//}
+
+
+===== ./src/main/java/com/example/orderservice/model/Order.java =====
+package com.example.orderservice.model;
+
+import jakarta.persistence.*;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+
+import java.time.LocalDateTime;
+
+@Entity
+@Table(name = "orders")
+@Getter @Setter
+@NoArgsConstructor
+@EntityListeners(AuditingEntityListener.class) // Required for @CreatedDate
+@AllArgsConstructor
+public class Order {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    @CreatedDate
+    @Column(nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+    String productCode;
+    Integer quantity;
+    private Double amount;
+    private String status; // PENDING, PAID, CANCELLED
+    // Constructor should NOT include createdAt
+    public Order(Long id, String productCode, Integer quantity, Double amount, String status) {
+        this.id = id;
+        this.productCode = productCode;
+        this.quantity = quantity;
+        this.amount = amount;
+        this.status = status;
+    }
+}
+
+
+
+
+===== ./src/main/java/com/example/orderservice/model/OutboxEvent.java =====
+package com.example.orderservice.model;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+
+import java.time.LocalDateTime;
+import java.util.UUID;
+@Entity
+@Table(name = "outbox")
+@Getter
+@Setter
+@NoArgsConstructor
+@EntityListeners(AuditingEntityListener.class) // Required for @CreatedDate
+
+public class OutboxEvent {
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+    @CreatedDate
+    @Column(nullable = false, updatable = false)
+    private LocalDateTime createdAt;
+    private String payload;
+    private boolean processed = false;
+
+    public OutboxEvent(String payload) { this.payload = payload; }
+}
+
+===== ./src/main/java/com/example/orderservice/consumer/SagaResponseListener.java =====
+package com.example.orderservice.consumer;
+
+import com.example.common.enums.SagaStatus;
+import com.example.common.events.SagaEvent;
+import com.example.orderservice.dto.OrderStatus;
+import com.example.orderservice.repository.OrderRepository;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
+
+@Service
+@Slf4j
+public class SagaResponseListener {
+
+    public static final String INVENTORY_EVENTS = "inventory-events";
+    public static final String ORDER_SAGA_GROUP = "order-saga-group";
+    private final OrderRepository orderRepository;
+    private final ObjectMapper objectMapper;
+
+        public SagaResponseListener(OrderRepository orderRepository, ObjectMapper objectMapper) {
+        this.orderRepository = orderRepository;
+        this.objectMapper = objectMapper;
+    }
+
+    // 1. Listen for Inventory Failures (Stock out)
+    @KafkaListener(topics = INVENTORY_EVENTS, groupId = ORDER_SAGA_GROUP)
+    public void handleInventoryEvents(String message) throws Exception {
+        SagaEvent event = objectMapper.readValue(message, SagaEvent.class);
+
+        if (SagaStatus.INVENTORY_REJECTED.equals(event.status())) {
+            updateOrderStatus(event.orderId(), OrderStatus.CANCELLED_OUT_OF_STOCK.name());
+        }
+    }
+
+    // 2. Listen for Payment Success/Failure
+    @KafkaListener(topics = "payment-events", groupId = "order-saga-group")
+    public void handlePaymentEvents(String message) throws Exception {
+        SagaEvent event = objectMapper.readValue(message, SagaEvent.class);
+
+        updateOrderStatus(event.orderId(),
+                SagaStatus.PAYMENT_SUCCESS.equals(event.status()) ? OrderStatus.CONFIRMED.name() : OrderStatus.CANCELLED_PAYMENT_FAILED.name());
+    }
+
+    private void updateOrderStatus(Long id, String status) {
+        orderRepository.findById(id).ifPresent(o -> {
+            o.setStatus(status);
+            orderRepository.save(o);
+            log.info("Order {} status updated to: {}", id, status);
+        });
+    }
+}
+
+
+
+
+////test
+//    private final OrderRepository orderRepository;
+//    private final ObjectMapper objectMapper;
+//
+//    public SagaResponseListener(OrderRepository orderRepository, ObjectMapper objectMapper) {
+//        this.orderRepository = orderRepository;
+//        this.objectMapper = objectMapper;
+//    }
+//
+//    @KafkaListener(topics = "payment-events", groupId = "order-group")
+//    public void consumePaymentResponse(String message) {
+//        try {
+//            // Match the field names you saw in the terminal!
+//            JsonNode jsonNode = objectMapper.readTree(message);
+//            Long orderId = jsonNode.get("orderId").asLong();
+//            String status = jsonNode.get("status").asText();
+//
+//            log.info("Updating Order {} with status {}", orderId, status);
+//
+//            orderRepository.findById(orderId).ifPresent(order -> {
+//                if ("SUCCESS".equals(status)) {
+//                    order.setStatus("CONFIRMED");
+//                } else {
+//                    order.setStatus("CANCELLED");
+//                }
+//                orderRepository.save(order);
+//            });
+//        } catch (Exception e) {
+//            log.error("Failed to update order status", e);
+//        }
+//    }
+
+
+===== ./src/main/java/com/example/orderservice/consumer/Test.java =====
+package com.example.orderservice.consumer;
+
+import java.util.Arrays;
+
+class Solution {
+    public static void main(String[] args) {
+        int[] nums = new int[]{0, 1, 0, 3, 12};
+        String s = "abc";
+        String t = "ahbgdc";
+        //System.out.println(isSubsequence(s,t));
+        int[] numbers = new int[]{4,1,2,1,2};
+
+        System.out.println(singleNumber(numbers));
+       // Arrays.stream(moveZeroes(nums)).forEach(x->System.out.println(x));
+
+    }
+
+    public static int[] moveZeroes(int[] nums) {
+        /*Input: nums = [0,1,0,3,12]
+        Output: [1,3,12,0,0]*/
+
+
+        int i = 0, j = 0, aux;
+        while (i < nums.length && nums.length>1) {
+            while ( j< nums.length && nums[j] == 0 ) {
+                j++;
+            }
+            if(j ==  nums.length){
+                break;
+            }
+            aux = nums[j];
+            nums[j] = 0;
+            nums[i] = aux;
+            i++;
+            j++;
+        }
+        return nums;
+    }
+        public static boolean isSubsequence(String s, String t) {
+//            String s = "aabc";
+//            String t = "aabgdc";
+            int max = -1;
+
+            for (int i=0; i<s.length();i++){
+
+                int indexOfSubString = t.indexOf(s.charAt(i),max+1);
+                if(indexOfSubString > max)
+                {
+                    max = indexOfSubString;
+
+                }
+                else return false;
+            }
+            return true;
+
+
+    }
+    public static int singleNumber(int[] nums) {
+return Arrays.stream(nums).distinct().findFirst().getAsInt();
+//        int found = 0;
+//        for (int i =0; i<nums.length;i++){
+//            int j = 0;
+//            while(j<nums.length)
+//            {
+//                if(nums[i] == nums[j] && i!=j){
+//                    break;
+//                }
+//
+//                if(j == nums.length-1)
+//                {
+//                    found = i;
+//                }
+//                j++;
+//
+//            }
+//
+//        }
+//        return nums[found];
+
+    }
+
+}
+
+
+===== ./src/main/java/com/example/orderservice/service/OrderService.java =====
+package com.example.orderservice.service;
+
+import com.example.common.enums.SagaStatus;
+import com.example.common.events.SagaEvent;
+import com.example.orderservice.dto.OrderRequest;
+import com.example.orderservice.dto.OrderStatus;
+import com.example.orderservice.model.Order;
+import com.example.orderservice.model.OutboxEvent;
+import com.example.orderservice.repository.OrderRepository;
+import com.example.orderservice.repository.OutboxRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.ObjectMapper;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class OrderService {
+    private final OrderRepository orderRepo;
+    private final OutboxRepository outboxRepo;
+    private final ObjectMapper mapper;
+
+    @Transactional
+    public void  createOrder(OrderRequest request) throws Exception {
+        // 1. Save the Order
+        Order order = orderRepo.save(new Order(null, request.productCode(), request.quantity(), request.amount(), OrderStatus.PENDING.name()));
+
+        // 2. Prepare the Event
+        SagaEvent event = SagaEvent.create(null,
+                order.getId(),
+                order.getProductCode(),
+                order.getQuantity(),
+                order.getAmount(),
+                SagaStatus.ORDER_PENDING
+        );
+        String json = mapper.writeValueAsString(event);
+
+        // 3. Save to Outbox (Same Transaction!)
+        outboxRepo.save(new OutboxEvent(json));
+    }
+
+    @Scheduled(fixedRate = 60000) // Run every minute
+    @Transactional
+    public void cleanupZombies() {
+        LocalDateTime cutoff = LocalDateTime.now().minusMinutes(15);
+
+        // 1. Find orders stuck in PENDING for too long
+        List<Order> stuckOrders = orderRepo.findAllByStatusAndCreatedAtBefore("PENDING", cutoff);
+
+        for (Order order : stuckOrders) {
+            // 2. Mark as Cancelled
+            order.setStatus("TIMEOUT_CANCELLED");
+            orderRepo.save(order);
+
+            // 3. Create an Outbox entry to notify other services to rollback!
+            SagaEvent rollback = SagaEvent.create(null,
+                    order.getId(), order.getProductCode(), order.getQuantity(),
+                    order.getAmount(), SagaStatus.ORDER_CANCELLED
+            );
+
+            outboxRepo.save(new OutboxEvent(mapper.writeValueAsString(rollback)));
+        }
+    }
+    @Scheduled(cron = "0 0 * * * *") // Run every hour
+    public void deleteOldProcessedEvents() {
+        // Delete events that are processed AND older than 24 hours
+        LocalDateTime dayAgo = LocalDateTime.now().minusDays(1);
+        outboxRepo.deleteByProcessedTrueAndCreatedAtBefore(dayAgo);
+    }
+}
+

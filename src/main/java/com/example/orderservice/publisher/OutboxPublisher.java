@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 @Component
 @RequiredArgsConstructor
 public class OutboxPublisher {
+    public static final String ORDER_CREATED = "order-created";
     private final OutboxRepository outboxRepo;
     private final KafkaTemplate<String, String> kafkaTemplate;
 
@@ -16,9 +17,11 @@ public class OutboxPublisher {
     public void publish() {
         var events = outboxRepo.findByProcessedFalse();
         events.forEach(event -> {
-            kafkaTemplate.send("order-created", event.getPayload());
+            kafkaTemplate.send(ORDER_CREATED, event.getPayload());
             event.setProcessed(true);
             outboxRepo.save(event);
         });
     }
+
+
 }

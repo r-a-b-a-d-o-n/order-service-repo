@@ -17,7 +17,7 @@ public class OrderController {
     @PostMapping
     public ResponseEntity<String> createOrder(@RequestBody OrderRequest request) {
         try {
-            orderService.createOrder(request.amount());
+            orderService.createOrder(request);
             return ResponseEntity.status(HttpStatus.CREATED).body("Order accepted and pending payment.");
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Error: " + e.getMessage());
