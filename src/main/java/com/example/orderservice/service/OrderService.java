@@ -8,11 +8,12 @@ import com.example.orderservice.model.Order;
 import com.example.orderservice.model.OutboxEvent;
 import com.example.orderservice.repository.OrderRepository;
 import com.example.orderservice.repository.OutboxRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -45,7 +46,7 @@ public class OrderService {
 
     @Scheduled(fixedRate = 60000) // Run every minute
     @Transactional
-    public void cleanupZombies() {
+    public void cleanupZombies() throws JsonProcessingException {
         LocalDateTime cutoff = LocalDateTime.now().minusMinutes(15);
 
         // 1. Find orders stuck in PENDING for too long
