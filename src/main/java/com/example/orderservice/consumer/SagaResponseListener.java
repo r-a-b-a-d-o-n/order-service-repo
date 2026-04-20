@@ -29,7 +29,7 @@ public class SagaResponseListener {
         SagaEvent event = objectMapper.readValue(message, SagaEvent.class);
 
         if (SagaStatus.INVENTORY_REJECTED.equals(event.status())) {
-            updateOrderStatus(event.orderId(), OrderStatus.CANCELLED_OUT_OF_STOCK.name());
+            updateOrderStatus(event.traceId(), event.orderId(), OrderStatus.CANCELLED_OUT_OF_STOCK.name());
         }
     }
 
@@ -38,16 +38,16 @@ public class SagaResponseListener {
     public void handlePaymentEvents(String message) throws Exception {
         SagaEvent event = objectMapper.readValue(message, SagaEvent.class);
 
-        updateOrderStatus(event.orderId(),
+        updateOrderStatus(event.traceId(), event.orderId(),
                 SagaStatus.PAYMENT_SUCCESS.equals(event.status()) ? OrderStatus.CONFIRMED.name() : OrderStatus.CANCELLED_PAYMENT_FAILED.name());
     }
 
-    private void updateOrderStatus(Long id, String status) {
+    private void updateOrderStatus(String traceId, Long id, String status) {
         orderRepository.findById(id).ifPresent(o -> {
             o.setStatus(status);
             orderRepository.save(o);
-            log.info("Order {} status updated to: {}", id, status);
-        });
+            log.info("[TRACE: {}] Order {} status updated to {}",
+                    traceId, id, status);        });
     }
 }
 
